@@ -8,224 +8,230 @@ import { Server } from "socket.io";
 import { v4 as uuid_v4 } from "uuid";
 
 import {
+  addUser, 
+  getUser,
+  onUserDisconnect 
+} from './users/users.js'
+
+import {
   parseEvent,
   setEventTimestamp,
-  createFirstMessage
+  createFirstMessage,
+  createMessage,
+  parseVoteToExpireTime,
+  prepareEventToEmit
 } from './utils/utils.js'
+
 
 dotenv.config();
 
-const DEFAULT_EXPIRATION = 3600;
-// const redisClient = Redis.createClient({host: "http://redis.io", port: "6379"});
-// const redisClient = Redis.createClient({url: "redis://127.0.0.1:6379"});
-// const redisSubscriber = Redis.createClient({url: "redis://127.0.0.1:6379"});
-const redisClient = Redis.createClient({
-  url: process.env.REDIS_URL,
-  password: process.env.REDIS_PASSWORD
-});
-let redisSubscriber
-// const redisSubscriber = Redis.createClient({
+// const redisClient = Redis.createClient({
 //   url: process.env.REDIS_URL,
 //   password: process.env.REDIS_PASSWORD
 // });
+const redisClient = Redis.createClient({url: "redis://127.0.0.1:6379"});
+let redisSubscriber = null;
 
-// redisSubscriber.on("pmessage", function(pattern, channel, message) {
-//     console.log(message)
-// })
-
-
-// redisSubscriber.on('connect', async function() {
-//   console.log('Connected!'); // Connected!
-
-async function connectRedis() {
-  try {
-    await redisClient.connect();
-    redisSubscriber = redisClient.duplicate();
-    await redisSubscriber.connect();
-
-    await redisSubscriber.pSubscribe('*', (channel, message) => {
-      console.log(channel, message)
-    })
-  } catch (err) {
-    console.log(err.message)
-  }
-}
-connectRedis();
-
-
-// redisSubscriber.PSUBSCRIBE("__keyspace@0__:*", err => console.log("dupa"));
-
-// const redisClient = Redis.createClient({url: "redis-10613.c250.eu-central-1-1.ec2.cloud.redislabs.com:10613"});
-
-
-// redisClient.connect();
-// redisSubscriber.connect();
-
-// async () => await redisSubscriber.pSubscribe("__keyspace@0__:*", err => console.log("dupa"));
-
+const DEFAULT_EXPIRATION = 100;
 const port = 7312; 
 const app = express();
 const server = createServer(app);
 const io = new Server(server, {cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }});
+  origin: "*",
+  methods: ["GET", "POST"]
+}}); 
 
 app.use(express.json());
 app.use(express.urlencoded({extended: true}));
 app.use(cors());
 app.use(express.static('public'))
 
-// let redisSubscriber; 
+setConnectionRedis();
 
-// x();
+io.use(async (socket, next) => {
+    try{
+      const { userId, userName } = socket.handshake.auth;
+      const usersChats = await redisClient.SMEMBERS(`UserChat:${userId}`);
 
-// async function x() {
-//   try {
-//     redisSubscriber = Redis.createClient({url: "redis://127.0.0.1:6379"});
-//     // redisSubscriber = redisClient.duplicate();
-//     // await redisSubscriber.connect();
-//     redisSubscriber.pSubscribe('__key*__:*')
-//     redisSubscriber.on('connect', function() {
-//       console.log('Connected!'); // Connected!
-//     });
-//     // redisClient.on('error', (err) => console.log('Redis Client Error', err));
-//     // redisClient.pSubscribe("Chat:*"); 
-
-//     // redisClient.on("pmessage", function(channel, message) {
-//     //     console.log(message)
-//     //     // redisClient.send(message);
-//     //   })
-//   } catch (err) {
-//     console.log(err)
-//   }
-// }
-  
-// redisSubscriber.on('error', (err) => console.log('Redis Client Error', err));
-
-// redisSubscriber.on("pmessage", function(channel, message) {
-//   console.log(message)
-//   redisClient.send(message);
-// })
-
-
+      addUser(socket, userId, userName, usersChats);
+      
+      next();
+    } catch (err) {
+      console.log(err)
+    }
+});
 
 io.on("connection", async (socket) => {
   console.log(`Made socket connection ${socket.id}`);
+
+  socket.on("hello", async (t, callback) => {
+    // callback({latencyInMiliseconds : Date.now() - t});
+    io.sockets.emit("message", "world")
+  })
+
+  socket.on("create-event", async (eventContent, t, callback) => {
+    try {
+      const {userId, userName} = getUser(socket.id);
+
+      const eventMapped = parseEvent({
+        ...eventContent, 
+        authorId: userId, 
+        authorName: userName
+      });
+      const eventReadyToSet = setEventTimestamp(eventMapped);
+      const newEventId = uuid_v4();
+      
+      const firstMessage = createFirstMessage(eventContent);
+  
+      await redisClient.multi()
+        .SETEX(`Event:${newEventId}`, DEFAULT_EXPIRATION, JSON.stringify(eventReadyToSet))
+        .SADD(`UserEvent:${userId}`, newEventId)
+        .SADD(`UserChat:${userId}`, newEventId)
+        .LPUSH(`Chat:${newEventId}`, JSON.stringify(firstMessage))
+        .EXPIRE(`Chat:${newEventId}`, DEFAULT_EXPIRATION)
+        .exec()
+  
+      // redisClient.PUBLISH("Event", JSON.stringify(eventReadyToSet))
+      socket.join(newEventId);
+      
+      socket.broadcast.emit("events", {status: "new"}, prepareEventToEmit(userId, eventReadyToSet));
+      callback({status:"ok", latency: Date.now() - t})      
+    } catch(err) {
+      callback({status: "error", error: err.message})
+    }
+  })
+
+  socket.on("send-message", async (messageContent, callback) => {
+    try {
+      console.log("message sent:");
+      console.log(messageContent);
+      const eventId = messageContent.chatId;
+
+      const {userId, userName} = getUser(socket.id);
+      const newMessage = createMessage({
+        ...messageContent, 
+        authorId: userId, 
+        authorName: userName
+      });
+      
+      await redisClient.multi()
+        .SADD(`UserChat:${userId}`, eventId)
+        .LPUSH(`Chat:${eventId}`, JSON.stringify(newMessage))
+        .exec()
+      
+      socket.join(eventId);
+      socket.broadcast.to(eventId).emit("messages", {status: "new"}, newMessage);
+      callback({status: "ok"});
+    } catch(err) {
+      callback({
+        status: "error",
+        error: err.message
+      });
+    }
+  })
+
+  socket.on("vote", async (voteData, callback) => {
+    try {
+      console.log("Vote on:");
+      console.log(voteData.chatId);
+
+      const eventId = voteData.chatId;
+      const additionalTTL = parseVoteToExpireTime(voteData.vote);
+
+      const {userId} = getUser(socket.id); 
+
+      const eventData = await redisClient.multi()
+        .TTL(`Event:${eventId}`)
+        .GET(`Event:${eventId}`)
+        .exec()
+      
+      const eventTTL = eventData[0];
+      const event = JSON.parse(eventData[1]);
+
+      if (event['voted'].indexOf(userId) !== -1) {
+        callback({
+          status: "error",
+          error: "User has already voted!"
+        });
+        return;
+      }
+      
+      event['voted'] = [...event['voted'], userId];
+      event['eventTemperature'] += Math.sign(additionalTTL);
+
+      await redisClient.multi()
+        .SETEX(`Event:${eventId}`, eventTTL + additionalTTL, JSON.stringify(event))
+        .EXPIRE(`Chat:${eventId}`, eventTTL + additionalTTL)
+        .exec()
+      
+      socket.broadcast.emit("events", {status: "update"}, prepareEventToEmit(userId, event));
+      callback({status: "ok"});
+    } catch(err) {
+      callback({
+        status: "error",
+        error: err.message
+      });
+    }
+  })
+
+  socket.on("disconnect", () => onUserDisconnect(socket.id))
 });
 
 app.get('/', async (req, res) => {
-  const x = await redisClient.SETEX("zz", 10, "asdjh");
+  // const x = await redisClient.SETEX("zz", 10, "asdjh");
   // const x = await redisClient.CONFIG_SET("notify-keyspace-events", "KEA");
-  console.log(x)
-  res.send("Works");
+  // console.log(x)
+  // const x = await redisClient.KEYS("*");
+  // console.log(x)  
+  res.send("Works"); 
 })
 
-app.get('/trigger', (req, res) => {
-  
-  io.emit("message","super duper message")
-  res.status(200);
+app.get('/setup', async (req, res) => {
+  const x = await redisClient.CONFIG_SET("notify-keyspace-events", "KEA");
+  if(x) res.status(200).send("success");
+  res.status(400).send("error");
 })
 
-app.get('/events', async (req, res) => {
-  const x = await redisClient.GET("Event:b8ad7055-29c7-475d-892a-5660dd58257f");
-  console.log(JSON.parse(x))
+app.get('/flush', async (req, res) => {
+  await redisClient.FLUSHALL();
   res.status(200).send();
 })
 
 app.get('/keys', async (req, res) => {
   const x = await redisClient.KEYS("*");
-  // const x = await redisClient.CONFIG_SET("notify-keyspace-events", "KEA");
-  console.log(x)
-  res.send("Works");
+  console.log(x)  
+  res.status(200).send();
 })
 
-app.post("/events", async (req, res) => {
-  try {
-    const eventMapped = parseEvent(req.body);
-    const eventReadyToSet = setEventTimestamp(eventMapped);
-    const newEventId = uuid_v4();
-    
-    const firstMessage = createFirstMessage(req.body);
+app.get('/trigger', async (req, res) => {
+  // io.sockets.emit("message", "world")
+  // redisClient.SETEX(`bueno`, 10, "kjsdhdjfvsbdv")
+  // redisClient.SMEMBERS(`UserEvent:1`);
 
-    await redisClient.multi()
-      .SETEX(`Event:${newEventId}`, DEFAULT_EXPIRATION, JSON.stringify(eventReadyToSet))
-      .SETEX(`UserEvent:${req.body.authorId}`, DEFAULT_EXPIRATION, newEventId)
-      .LPUSH(`Chat:${newEventId}`, JSON.stringify(firstMessage))
-      .EXPIRE(`Chat:${newEventId}`, DEFAULT_EXPIRATION)
-      .LPUSH(`Voted:${newEventId}`, String(req.body.authorId))
-      .EXPIRE(`Voted:${newEventId}`, DEFAULT_EXPIRATION)
-      .exec()
-      
-    res.status(200).send()
-  } catch(err) {
-    console.log(err)
-    res.status(400).send("Could not create an event")
-  }
+  // const redisMulti = redisClient.multi();
+  // ids.forEach(id => redisMulti.SREM("UserEvent:5", id));
+  // await redisMulti.exec();
+  
+  const usersChats = await redisClient.SMEMBERS(`UserEvent:5`);
+  console.log(usersChats);
+  res.status(200).send();
+})
+
+app.get('/events', async (req, res) => {
+  const eventPattern = "Event:";
+  const eventKeysList = await scanMatchingKeys(eventPattern + "*");
+  console.log(eventKeysList)
+  const eventIdsList = getIdsFromStringList(eventKeysList, eventPattern)
+  const events = await getKeyValuesFromKeys(eventIdsList, eventPattern);
+  res.status(200).send(events);
 })
 
 
-
-
-
-// app.get('/events', (req, res) => {
-//   redisClient.set("hi", "world");
-//   res.status(200).send("siema");
-
-//   // try{
-//   //   // redisClient.LPUSH("someChatId", "firstMessage")
-//   //   redisClient.get("events", async (error, events) => {
-//   //     if(error) console.log(error);
-//   //     if(events) {
-//   //       console.log("cache hit");
-//   //       res.status(200).json(events);
-//   //     } else {
-//   //       console.log("cache miss");
-//   //       const pins = [
-//   //         {
-//   //           id: 1,
-//   //           eventName: "1_1",
-//   //           eventType: "meeting",
-//   //           creationDate: "1999-01-01",
-//   //           expiryDate: "1999-01-01",
-//   //           description: "Bardzo ładne wydarzenie 1",
-//   //           latitude: 50.0659198,
-//   //           longitude: 19.9145029,
-//   //           authorId: 11
-//   //         },
-//   //         {
-//   //           id: 2,
-//   //           eventName: "2+2",
-//   //           eventType: "tradeOffer",
-//   //           creationDate: "1999-01-01",
-//   //           expiryDate: "1999-01-01",
-//   //           description: "Bardzo ładne wydarzenie 2",
-//   //           latitude: 50.0559198,
-//   //           longitude: 19.9245029,
-//   //           authorId: 22
-//   //         },
-//   //         {
-//   //           id: 3,
-//   //           eventName: "3_3",
-//   //           eventType: "alert",
-//   //           creationDate: "1999-01-01",
-//   //           expiryDate: "1999-01-01",
-//   //           description: "Bardzo ładne wydarzenie 3",
-//   //           latitude: 50.0529198,
-//   //           longitude: 19.9215029,
-//   //           authorId: 22
-//   //         },
-//   //       ];
-//   //       redisClient.setEx("events", DEFAULT_EXPIRATION, JSON.stringify(pins));
-//   //     }
-//   //     res.status(200).json(pins);
-//   //   })
-//   // } catch (err) {
-//   //   console.log(err);
-//   // }
-
-// })
-
+app.get('/events/messages', async (req, res) => {
+  const { eventId } = req.body; 
+  const chat = await getChatMessages(eventId);
+  res.status(200).send(chat);
+})
 
 server.listen(process.env.PORT || port, () => {
   console.log(`Server listening`)
@@ -233,4 +239,107 @@ server.listen(process.env.PORT || port, () => {
   console.log(`http://localhost:${port}`);
 })
 
+async function setConnectionRedis() {
+  try {
+    await redisClient.connect();
+    redisSubscriber = redisClient.duplicate();
+    await redisSubscriber.connect();
 
+    // await redisSubscriber.pSubscribe('*', (message, channel) => {
+    //   console.log(channel, message);
+    //   io.sockets.emit("message", message)
+    // })
+
+    await redisSubscriber.subscribe('__keyevent@0__:expired', async (message, channel) => {
+      console.log(channel, message);
+      try {
+        const eventId = getEventIdFromMessage(message);
+        await purgeRedisAfterEventExpired(eventId);
+
+        io.sockets.emit("event", {status: "expired"}, eventId);
+      } catch (err) {
+        console.log(err.message);
+      }
+    })
+  } catch (err) {
+    console.log(err.message)
+  }
+}
+
+async function scanMatchingKeys(pattern){
+  const fullEventList = [];
+  let cursor = '0';
+  
+  async function scan() {
+  
+    // might be pagination implemented here -> depending on COUNT value
+    const redisScanReply = await redisClient.SCAN(cursor, {MATCH: pattern, COUNT: 100}); 
+
+    cursor = redisScanReply.cursor;
+    fullEventList.push(...redisScanReply.keys);
+  
+    if(cursor === 0) return fullEventList;
+    return scan();
+  }
+
+  try {
+    return scan();
+  } catch (err) {
+    return [];
+  }
+} 
+
+function getIdsFromStringList(list, pattern) {
+  return list.map(element => element.split(pattern)[1]);
+}
+
+async function getKeyValuesFromKeys(keys, pattern) {
+  try {
+    const elementList = await keys.reduce(async (prevPromise, key) => {
+      const result = await redisClient.GET(pattern + key);
+      const prev = await prevPromise;
+      
+      if(!result) return prev;
+      
+      prev[key] = JSON.parse(result);
+      return prev;
+    }, {});
+
+    return elementList;
+
+  } catch (err) {
+    return {error: err.message}
+  }
+}
+
+async function getChatMessages(eventId) {
+  try {
+    const chat = await redisClient.LRANGE(`Chat:${eventId}`, 0, -1);
+
+    const elementList = chat.reduce((prev, message) => {
+      if(!message) return prev;
+      prev.push(JSON.parse(message));
+      return prev;
+    }, []);
+
+    return elementList;
+  } catch (err) {
+    return [];
+  }
+}
+
+async function purgeRedisAfterEventExpired(eventId) {
+  const keysToBePurged = await scanMatchingKeys("User*:*");
+  const redisMulti = redisClient.multi();
+  keysToBePurged.forEach(key => redisMulti.SREM(key, eventId));
+  await redisMulti.exec();
+}
+
+function getEventIdFromMessage(message) {
+  if (!message) throw new Error("Invalid event message");
+  
+  const id = message.split("Event:")[1];
+  if (!id) throw new Error("Invalid event message");
+
+  return id;
+}

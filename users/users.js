@@ -1,31 +1,62 @@
-const users = [];
+let activeUsers = {};
+// let chatRooms = {};
 
-const addUser = ({ id, name, room }) => {
-  name = name.trim().toLowerCase();
-  room = room.trim().toLowerCase();
+const addUser = (socket, userId, userName, chatRooms) => {
+  const socketId = socket.id;
+  if (!socketId) return { error: 'SocketId is required.' };
+  if (!userId) return { error: 'UserId is required.' };
+  if (!!chatRooms) chatRooms = [];
 
-  const existingUser = users.find(
-    user => user.room === room && user.name === name
-  );
+  activeUsers[socketId] = { userId, userName }
 
-  if (!name || !room) return { error: 'Username and room are required.' };
-  if (existingUser) return { error: 'Username already exists.' };
+  chatRooms.forEach(room => socket.join(room));
+  // chatRooms = chatRooms.reduce((prev, room) => {
+  //   prev[room] = [...(prev[room] || []), socketId]; 
+  //   return prev;
+  // }, chatRooms);
+  
+  return;
+}
 
-  const user = { id, name, room };
+const onUserDisconnect = (socketId) => {
+  console.log(`delete socketId: ${socketId}`)
+  delete activeUsers[socketId];
+  return;
 
-  users.push(user);
+  // chatRooms = Object.keys(chatRooms).reduce((prev, room) => {
+  //   const socketIndex = prev[room].indexOf(socketId);
+    
+  //   if (socketIndex === -1) return prev;
+    
+  //   prev[socketId] = prev[socketId].splice(socketIndex, 1)[0]; 
+  //   return prev;
+  // }, chatRooms)
+}
+const getUser = socketId => activeUsers[socketId];
 
-  return { user };
-};
+// const addUser = ({ id, name, chatRooms }) => {
 
-const removeUser = id => {
-  const index = users.findIndex(user => user.id === id);
+//   const existingUser = users.find(
+//     user => user.id === id
+//   );
 
-  if (index !== -1) return users.splice(index, 1)[0];
-};
+//   if (!id) return { error: 'UserId and room are required.' };
+//   if (existingUser) return { error: 'User already exists.' };
 
-const getUser = id => users.find(user => user.id === id);
+//   const newUser = { id, name, room };
+//   users.push(newUser);
 
-const getUsersInRoom = room => users.filter(user => user.room === room);
+//   return newUser;
+// };
 
-module.exports = { addUser, removeUser, getUser, getUsersInRoom };
+// const removeUser = id => {
+//   const index = users.findIndex(user => user.id === id);
+
+//   if (index !== -1) return users.splice(index, 1)[0];
+// };
+
+// const getUser = id => users.find(user => user.id === id);
+
+// const getUsersInRoom = room => users.filter(user => user.room === room);
+
+export { addUser, onUserDisconnect, getUser };
