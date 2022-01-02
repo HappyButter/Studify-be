@@ -9,7 +9,7 @@ export function createFirstMessage(eventDetails) {
 	return {
 		authorId: eventDetails.authorId,
 		authorName: eventDetails.authorName,
-		message: `Welcome to ${eventDetails.title} event chat!`,
+		message: `Welcome to ${eventDetails.eventName} event chat!`,
 		timestamp
 	}
 }
@@ -38,7 +38,7 @@ export function parseEvent(reqBody) {
 		...eventDetails,
 		authorId: reqBody.authorId,
 		authorName: reqBody.authorName,
-		title: reqBody.title,
+		eventName: reqBody.eventName,
 		latitude: reqBody.latitude,
 		longitude: reqBody.longitude,
 		voted: [reqBody.authorId],
@@ -88,6 +88,7 @@ export function prepareEventToEmit(userId, event) {
 	if (!userId) throw new Error("No such a user id");
 	
 	const hasUserVoted = event['voted'].indexOf(userId) > -1;
+	delete event['voted'];
 	
 	return {
 		...event,
