@@ -96,9 +96,9 @@ io.on("connection", async (socket) => {
 				.EXPIRE(`Chat:${newEventId}`, DEFAULT_EXPIRATION)
 				.exec();
 
-			socket.join(newEventId);
+			await socket.join(newEventId);
 
-			socket.emit("event-new", prepareEventToEmit(userId, eventReadyToSet));
+			io.emit("event-new", prepareEventToEmit(userId, eventReadyToSet));
 		} catch (err) {
 			console.log(err);
 		}
@@ -106,8 +106,6 @@ io.on("connection", async (socket) => {
 
 	socket.on("send-message", async (messageContent) => {
 		try {
-			console.log("message sent:");
-			console.log(messageContent);
 			const eventId = messageContent.chatId;
 
 			const {userId, userName} = getUser(socket.id);
@@ -123,8 +121,8 @@ io.on("connection", async (socket) => {
 				.LPUSH(`Chat:${eventId}`, JSON.stringify(newMessage))
 				.exec();
 
-			socket.join(eventId);
-			socket.to(eventId).emit("message", {[eventId]: newMessage});
+			await socket.join(eventId);
+			io.in(eventId).emit("message", {[eventId]: newMessage});
 		} catch (err) {
 			console.log(err);
 		}
@@ -157,7 +155,7 @@ io.on("connection", async (socket) => {
 				.EXPIRE(`Chat:${eventId}`, eventTTL + additionalTTL)
 				.exec();
 
-			socket.emit("event-update", prepareEventToEmit(userId, event));
+			io.emit("event-update", prepareEventToEmit(userId, event));
 		} catch (err) {
 			console.log(err);
 		}
@@ -186,15 +184,6 @@ io.on("connection", async (socket) => {
 	socket.on("disconnect", () => onUserDisconnect(socket.id));
 });
 
-app.get("/", async (req, res) => {
-	// const x = await redisClient.SETEX("zz", 10, "asdjh");
-	// const x = await redisClient.CONFIG_SET("notify-keyspace-events", "KEA");
-	// console.log(x)
-	// const x = await redisClient.KEYS("*");
-	// console.log(x)
-	res.send("Works");
-});
-
 app.get("/setup", async (req, res) => {
 	const x = await redisClient.CONFIG_SET("notify-keyspace-events", "KEA");
 	if (x) res.status(200).send("success");
@@ -207,40 +196,8 @@ app.get("/flush", async (req, res) => {
 });
 
 app.get("/keys", async (req, res) => {
-	const x = await redisClient.KEYS("*");
-	console.log(x);
-	res.status(200).send();
-});
-
-app.get("/trigger", async (req, res) => {
-	// io.sockets.emit("message", "world")
-	// redisClient.SETEX(`bueno`, 10, "kjsdhdjfvsbdv")
-	// redisClient.SMEMBERS(`UserEvent:1`);
-
-	// const redisMulti = redisClient.multi();
-	// ids.forEach(id => redisMulti.SREM("UserEvent:5", id));
-	// await redisMulti.exec();
-
-	// const usersChats = await redisClient.SMEMBERS(`UserEvent:5`);
-	// console.log(usersChats);
-	console.log(getAll());
-	res.status(200).send();
-});
-
-app.get("/events", async (req, res) => {
-	const {userId} = getUser(socket.id);
-
-	const eventPattern = "Event:";
-	const eventKeysList = await scanMatchingKeys(eventPattern + "*");
-	const eventIdsList = getIdsFromStringList(eventKeysList, eventPattern);
-	const events = await getKeyValuesFromKeys(eventIdsList, eventPattern, userId);
-	res.status(200).send(events);
-});
-
-app.get("/events/messages", async (req, res) => {
-	const {eventId} = req.body;
-	const chat = await getChatMessages(eventId);
-	res.status(200).send(chat);
+	const keys = await redisClient.KEYS("*");
+	res.status(200).send(keys);
 });
 
 server.listen(process.env.PORT || port, () => {
@@ -346,7 +303,7 @@ async function getChatMessages(eventId) {
 			return prev;
 		}, []);
 
-		return elementList;
+		return elementList.reverse();
 	} catch (err) {
 		return [];
 	}

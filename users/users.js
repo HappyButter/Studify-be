@@ -8,7 +8,7 @@ const addUser = (socket, userId, userName, chatRooms) => {
 
   activeUsers[socketId] = { userId, userName };
 
-  chatRooms.forEach(room => socket.join(room));
+  chatRooms.forEach(async room => await socket.join(room));
 
   return;
 }
